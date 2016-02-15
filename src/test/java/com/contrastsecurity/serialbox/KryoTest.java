@@ -188,7 +188,7 @@ public class KryoTest extends TestCase {
 	
 	@Test
 	@Ignore
-	private void testAtomicInteger() throws Exception {
+	private void testJnaFree() throws Exception {
 		/*
 		 * Create a 1-byte buffer from malloc().
 		 */

@@ -1,7 +1,9 @@
 package com.contrastsecurity.serialbox;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import junit.framework.TestCase;
 
@@ -40,6 +42,13 @@ public class XStreamTest extends TestCase {
 		assertEquals("i", rebuiltList.get(0));
 		assertEquals("stuffed", rebuiltList.get(1));
 		assertFalse(rebuiltList.get(2) instanceof String);
+	}
+	
+	@Test
+	public void testDefaultMapType() {
+		String xml = "<map><entry><int>1</int><int>2</int></entry></map>";
+		Map<?,?> map = (Map<?,?>) xstream.fromXML(xml);
+		assertTrue(map instanceof HashMap);
 	}
 	
 }

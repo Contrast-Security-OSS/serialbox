@@ -6,12 +6,12 @@ public class AcmeMessage {
 
 	private String subject;
 	private String body;
-	private List<AcmeRecieipt> recipients;
+	private List<AcmeRecipient> recipients;
 	
-	public List<AcmeRecieipt> getRecipients() {
+	public List<AcmeRecipient> getRecipients() {
 		return recipients;
 	}
-	public void setRecipients(List<AcmeRecieipt> recipients) {
+	public void setRecipients(List<AcmeRecipient> recipients) {
 		this.recipients = recipients;
 	}
 	
